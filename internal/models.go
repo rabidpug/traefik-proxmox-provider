@@ -81,7 +81,11 @@ func (pc *ParsedConfig) GetTraefikMap() map[string]string {
 func (pai *ParsedAgentInterfaces) GetIPs() []IP {
 	ips := make([]IP, 0)
 	for _, r := range pai.Result {
-		ips = append(ips, r.IPAddresses...)
+		for _,x := range x.IPAddresses {
+			if x.AddressType == "inet" {
+				ips = append(ips, x)
+			}
+		}
 	}
 	return ips
 }
