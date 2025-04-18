@@ -1,0 +1,180 @@
+From c70fb1f2d6ecdc096dbcff8f0fcf3963823e0d29 Mon Sep 17 00:00:00 2001
+From: Corey Stone <nx211@authoritah.com>
+Date: Tue, 8 Apr 2025 12:26:54 -0500
+Subject: [PATCH 1/2] added support for /nodes/{node}/lxc/{vmid}/interfaces
+ endpoint
+
+---
+ internal/client.go   | 52 ++++++++++++++++++++++++++++++++++++++++++++
+ provider/provider.go | 17 ++++++++++-----
+ 2 files changed, 64 insertions(+), 5 deletions(-)
+
+diff --git a/internal/client.go b/internal/client.go
+index 3fcd391..4276d94 100644
+--- a/internal/client.go
++++ b/internal/client.go
+@@ -9,6 +9,8 @@ import (
+ 	"io"
+ 	"log"
+ 	"net/http"
++	"strconv"
++	"strings"
+ 	"time"
+ )
+ 
+@@ -200,4 +202,54 @@ func (c *ProxmoxClient) GetVMNetworkInterfaces(ctx context.Context, nodeName str
+ 		return nil, err
+ 	}
+ 	return &response.Data, nil
++}
++
++// GetContainerNetworkInterfaces retrieves network interfaces from a container
++func (c *ProxmoxClient) GetContainerNetworkInterfaces(ctx context.Context, nodeName string, vmID uint64) (*ParsedAgentInterfaces, error) {
++	var response struct {
++		Data []struct {
++			Inet string `json:"inet"`
++		} `json:"data"`
++	}
++	err := c.Get(ctx, fmt.Sprintf("/nodes/%s/lxc/%d/interfaces", nodeName, vmID), &response)
++	if err != nil {
++		return nil, err
++	}
++
++	result := &ParsedAgentInterfaces{
++		Result: make([]struct {
++			IPAddresses []IP `json:"ip-addresses"`
++		}, 0),
++	}
++
++	for _, iface := range response.Data {
++		if iface.Inet == "" {
++			continue
++		}
++
++		// Split IP and prefix
++		ipParts := strings.Split(iface.Inet, "/")
++		if len(ipParts) != 2 {
++			continue
++		}
++
++		prefix, err := strconv.ParseUint(ipParts[1], 10, 64)
++		if err != nil {
++			continue
++		}
++
++		result.Result = append(result.Result, struct {
++			IPAddresses []IP `json:"ip-addresses"`
++		}{
++			IPAddresses: []IP{
++				{
++					Address:     ipParts[0],
++					AddressType: "ipv4",
++					Prefix:      prefix,
++				},
++			},
++		})
++	}
++
++	return result, nil
+ } 
+\ No newline at end of file
+diff --git a/provider/provider.go b/provider/provider.go
+index 667e6cd..3f253b4 100644
+--- a/provider/provider.go
++++ b/provider/provider.go
+@@ -200,10 +200,18 @@ func getServiceMap(client *internal.ProxmoxClient, ctx context.Context) (map[str
+ 	return servicesMap, nil
+ }
+ 
+-func getIPsOfService(client *internal.ProxmoxClient, ctx context.Context, nodeName string, vmID uint64) (ips []internal.IP, err error) {
++func getIPsOfService(client *internal.ProxmoxClient, ctx context.Context, nodeName string, vmID uint64, isContainer bool) (ips []internal.IP, err error) {
++	if isContainer {
++		interfaces, err := client.GetContainerNetworkInterfaces(ctx, nodeName, vmID)
++		if err != nil {
++			return nil, fmt.Errorf("error getting container network interfaces: %w", err)
++		}
++		return interfaces.GetIPs(), nil
++	}
++	
+ 	interfaces, err := client.GetVMNetworkInterfaces(ctx, nodeName, vmID)
+ 	if err != nil {
+-		return nil, fmt.Errorf("error getting network interfaces: %w", err)
++		return nil, fmt.Errorf("error getting VM network interfaces: %w", err)
+ 	}
+ 	return interfaces.GetIPs(), nil
+ }
+@@ -230,7 +238,7 @@ func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName
+ 			
+ 			service := internal.NewService(vm.VMID, vm.Name, traefikConfig)
+ 			
+-			ips, err := getIPsOfService(client, ctx, nodeName, vm.VMID)
++			ips, err := getIPsOfService(client, ctx, nodeName, vm.VMID, false)
+ 			if err == nil {
+ 				service.IPs = ips
+ 			}
+@@ -260,8 +268,7 @@ func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName
+ 			
+ 			service := internal.NewService(ct.VMID, ct.Name, traefikConfig)
+ 			
+-			// Try to get container IPs if possible
+-			ips, err := getIPsOfService(client, ctx, nodeName, ct.VMID)
++			ips, err := getIPsOfService(client, ctx, nodeName, ct.VMID, true)
+ 			if err == nil {
+ 				service.IPs = ips
+ 			}
+
+From e45f40e5f6598eef5844b21fb58836d5833369b4 Mon Sep 17 00:00:00 2001
+From: Corey Stone <nx211@authoritah.com>
+Date: Tue, 8 Apr 2025 12:27:34 -0500
+Subject: [PATCH 2/2] update hostname endpoint to
+ /nodes/{node}/lxc/{vmid}/status/current over config state endpoint
+
+---
+ internal/client.go   | 14 ++++++++++++++
+ provider/provider.go |  9 ++++++++-
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/internal/client.go b/internal/client.go
+index 4276d94..efe29f5 100644
+--- a/internal/client.go
++++ b/internal/client.go
+@@ -252,4 +252,18 @@ func (c *ProxmoxClient) GetContainerNetworkInterfaces(ctx context.Context, nodeN
+ 	}
+ 
+ 	return result, nil
++}
++
++// GetContainerHostname retrieves the hostname of a container
++func (c *ProxmoxClient) GetContainerHostname(ctx context.Context, nodeName string, vmID uint64) (string, error) {
++	var response struct {
++		Data struct {
++			Hostname string `json:"name"`
++		} `json:"data"`
++	}
++	err := c.Get(ctx, fmt.Sprintf("/nodes/%s/lxc/%d/status/current", nodeName, vmID), &response)
++	if err != nil {
++		return "", err
++	}
++	return response.Data.Hostname, nil
+ } 
+\ No newline at end of file
+diff --git a/provider/provider.go b/provider/provider.go
+index 3f253b4..941ee7c 100644
+--- a/provider/provider.go
++++ b/provider/provider.go
+@@ -266,7 +266,14 @@ func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName
+ 			traefikConfig := config.GetTraefikMap()
+ 			log.Printf("Container %s (%d) traefik config: %v", ct.Name, ct.VMID, traefikConfig)
+ 			
+-			service := internal.NewService(ct.VMID, ct.Name, traefikConfig)
++			// Get container hostname
++			hostname, err := client.GetContainerHostname(ctx, nodeName, ct.VMID)
++			if err != nil {
++				log.Printf("Error getting container hostname for %d: %v", ct.VMID, err)
++				hostname = ct.Name // Fallback to container name
++			}
++			
++			service := internal.NewService(ct.VMID, hostname, traefikConfig)
+ 			
+ 			ips, err := getIPsOfService(client, ctx, nodeName, ct.VMID, true)
+ 			if err == nil {
