@@ -82,7 +82,7 @@ func (pai *ParsedAgentInterfaces) GetIPs() []IP {
 	ips := make([]IP, 0)
 	for _, r := range pai.Result {
 		for _, x := range r.IPAddresses {
-			if x.AddressType == "inet" {
+			if (x.AddressType == "inet" || x.AddressType == "ipv4") {
 				ips = append(ips, x)
 			}
 		}
